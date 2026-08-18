@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 运行时生成的结果文件
+results/
+*.perfetto-trace
+*_report.json
+*.csv
+*.xlsx
+
+# 配置文件（含设备路径等本地信息）
+cases.json
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store

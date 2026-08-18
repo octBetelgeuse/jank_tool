@@ -1,0 +1,8 @@
+# Android Jank Test Tool - Python 依赖
+# Python >= 3.9 (使用了 dataclasses, typing 等特性)
+#
+# 安装命令: pip install -r requirements.txt
+
+uiautomator2>=2.16.0      # Android UI 自动化（控件查找/点击/截图）
+Pillow>=9.0.0             # 图片处理（uiautomator_manager 中截图功能）
+openpyxl>=3.0.0           # Excel 报告导出（未安装时自动降级为 CSV）
