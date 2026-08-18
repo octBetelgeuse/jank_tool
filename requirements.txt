@@ -2,6 +2,8 @@
 # Python >= 3.9 (使用了 dataclasses, typing 等特性)
 #
 # 安装命令: pip install -r requirements.txt
+# 从 packages 文件夹离线安装
+# pip install --no-index --find-links=packages -r requirements.txt
 
 uiautomator2>=2.16.0      # Android UI 自动化（控件查找/点击/截图）
 Pillow>=9.0.0             # 图片处理（uiautomator_manager 中截图功能）
