@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, TYPE_CHECKING
+from typing import Any, Callable, List, Dict, Optional, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from case_config import JankLevelThresholds
@@ -86,6 +86,40 @@ class PerfettoTraceAnalyzer:
                 "perfetto 未安装。请运行: pip install perfetto\n"
                 "或者查看: https://perfetto.dev/docs/analysis/trace-processor-python"
             )
+        # 查找本地 trace_processor_shell.exe，避免 perfetto 包联网自动下载
+        self.tp_bin_path: Optional[str] = self._find_trace_processor_bin()
+
+    @staticmethod
+    def _find_trace_processor_bin() -> Optional[str]:
+        """
+        按优先级查找 trace_processor_shell 可执行文件：
+        1) 工程目录 tools/trace_processor_shell.exe  (Windows)
+        2) 工程目录 tools/trace_processor_shell      (Linux/Mac)
+        3) perfetto 官方缓存目录：
+           ~/.local/share/perfetto/prebuilts/<version>/<platform>/trace_processor_shell(.exe)
+        返回找到的绝对路径；找不到返回 None（让 perfetto 自行处理，其会尝试下载）
+        """
+        # 优先用工程内 tools/ 目录 —— 离线部署最稳
+        project_root = os.path.dirname(os.path.abspath(__file__))
+        tools_dir = os.path.join(project_root, "tools")
+        candidates = [
+            os.path.join(tools_dir, "trace_processor_shell.exe"),
+            os.path.join(tools_dir, "trace_processor_shell"),
+        ]
+        for p in candidates:
+            if os.path.isfile(p):
+                return p
+        # 兜底：perfetto 预下载的官方缓存
+        perfetto_home = os.path.join(os.path.expanduser("~"), ".local", "share", "perfetto", "prebuilts")
+        if os.path.isdir(perfetto_home):
+            # 遍历所有版本/平台找 exe
+            for root, _, files in os.walk(perfetto_home):
+                for fn in files:
+                    if fn.startswith("trace_processor_shell"):
+                        full = os.path.join(root, fn)
+                        if os.access(full, os.X_OK) or fn.endswith(".exe"):
+                            return full
+        return None
 
     def _run_query(self, tp, query: str) -> List[Dict]:
         """执行SQL查询并返回字典列表"""
@@ -233,7 +267,14 @@ class PerfettoTraceAnalyzer:
             # 兜底：用户给了具体App列表则不认识的归other；All模式统一归other
             return "other" if user_app_patterns else "all"
 
-        tp = self.TraceProcessor(trace=trace_file)
+        # 构造 TraceProcessor 初始化参数
+        tp_kwargs: Dict[str, Any] = {"trace": trace_file}
+        if self.tp_bin_path:
+            tp_kwargs["bin_path"] = self.tp_bin_path
+            _log(f"[TraceProcessor] 使用本地可执行文件: {self.tp_bin_path}")
+        else:
+            _log("[TraceProcessor] 未找到本地 trace_processor_shell，将使用 perfetto 内置下载（需要联网）")
+        tp = self.TraceProcessor(**tp_kwargs)
 
         jank_type_breakdown: Dict[str, int] = {}
         jank_tag_breakdown: Dict[str, int] = {}

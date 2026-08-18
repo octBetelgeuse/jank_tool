@@ -35,6 +35,9 @@ class JankTestGUI:
         self.root.geometry("1180x780")
         self.root.resizable(True, True)
 
+        # 窗口关闭时自动保存配置
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+
         # 加载配置
         self.app_cfg: AppConfig = load_config()
 
@@ -470,20 +473,36 @@ class JankTestGUI:
         )
 
     def _apply_camera_ui(self):
-        """将GUI中的相机UI配置应用到case_scripts模块（立即生效）"""
+        """将GUI中的相机UI配置应用到case_scripts模块（立即生效+持久化保存）"""
         try:
             ui = self._current_camera_ui()
             import case_scripts
             case_scripts.set_camera_ui(ui)
-            # 同步到app_cfg
+            # 同步到app_cfg并立即保存到文件
             self.app_cfg.camera_ui = ui
             self.app_cfg.package_name = ui.package_name
-            self.log(f"[相机UI] 配置已应用: 包名={ui.package_name}, "
+            # 同步cases里的package_name
+            for case in self.app_cfg.cases:
+                case.package_name = ui.package_name
+            save_config(self.app_cfg)
+            self.log(f"[相机UI] 配置已应用并保存: 包名={ui.package_name}, "
                      f"快门IDs={ui.shutter_resource_ids}, "
                      f"录像IDs={ui.record_resource_ids}")
-            messagebox.showinfo("成功", "相机UI配置已应用到脚本！")
+            messagebox.showinfo("成功", "相机UI配置已应用并保存到脚本！")
         except Exception as e:
             messagebox.showerror("错误", f"应用失败: {e}")
+
+    def _on_closing(self):
+        """窗口关闭前自动保存配置，防止修改丢失"""
+        try:
+            self.app_cfg.cases = list(self.cases)
+            self.app_cfg.thresholds = self._current_thresholds()
+            self.app_cfg.camera_ui = self._current_camera_ui()
+            self.app_cfg.package_name = self.app_cfg.camera_ui.package_name
+            save_config(self.app_cfg)
+        except Exception as e:
+            print(f"[警告] 窗口关闭保存配置失败: {e}")
+        self.root.destroy()
 
     def log(self, message: str, widget=None):
         text_w = widget or self.log_text
