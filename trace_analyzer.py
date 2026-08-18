@@ -79,8 +79,9 @@ class JankAnalysisResult:
 class PerfettoTraceAnalyzer:
     def __init__(self):
         try:
-            from perfetto.trace_processor import TraceProcessor
+            from perfetto.trace_processor import TraceProcessor, TraceProcessorConfig
             self.TraceProcessor = TraceProcessor
+            self.TraceProcessorConfig = TraceProcessorConfig
         except ImportError:
             raise RuntimeError(
                 "perfetto 未安装。请运行: pip install perfetto\n"
@@ -268,13 +269,13 @@ class PerfettoTraceAnalyzer:
             return "other" if user_app_patterns else "all"
 
         # 构造 TraceProcessor 初始化参数
-        tp_kwargs: Dict[str, Any] = {"trace": trace_file}
         if self.tp_bin_path:
-            tp_kwargs["bin_path"] = self.tp_bin_path
+            tp_config = self.TraceProcessorConfig(bin_path=self.tp_bin_path)
             _log(f"[TraceProcessor] 使用本地可执行文件: {self.tp_bin_path}")
         else:
+            tp_config = self.TraceProcessorConfig()
             _log("[TraceProcessor] 未找到本地 trace_processor_shell，将使用 perfetto 内置下载（需要联网）")
-        tp = self.TraceProcessor(**tp_kwargs)
+        tp = self.TraceProcessor(trace=trace_file, config=tp_config)
 
         jank_type_breakdown: Dict[str, int] = {}
         jank_tag_breakdown: Dict[str, int] = {}
