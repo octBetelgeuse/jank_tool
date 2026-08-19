@@ -36,6 +36,7 @@ class _DefaultCameraUI:
     front_camera_keywords = ["前置", "前摄", "切换", "翻转", "rotate", "Flip"]
     photo_mode_keywords = ["拍照", "PHOTO", "Photo", "photo", "普通", "标准"]
     video_mode_keywords = ["录像", "视频", "VIDEO", "Video", "video", "录影"]
+    camera_text_aliases = ["相机", "Camera", "camera", "摄像头"]
 
 # 全局引用
 _camera_ui = _DefaultCameraUI()
@@ -90,23 +91,494 @@ def _get_switch_fallback_pos() -> tuple:
     return _camera_ui.switch_camera_fallback_x_ratio, _camera_ui.switch_camera_fallback_y_ratio
 
 
+def _get_camera_text_aliases() -> list:
+    """获取相机桌面图标文字别名列表"""
+    return list(_camera_ui.camera_text_aliases)
+
+
 # 兼容旧代码的PACKAGE常量
 PACKAGE = _get_package()
+
+
+# ============================================================
+# 负载操作 - 通用辅助
+# ============================================================
+
+# 启动页/欢迎页「跳过」按钮常见关键词（按匹配优先级排序，先文本后描述/资源ID）
+_SPLASH_SKIP_KEYWORDS = [
+    # 纯中文
+    "跳过", "跳过广告", "立即跳过", "跳过此广告", "跳过广告>", "跳过 >", "→跳过",
+    "跳过3", "跳过2", "跳过1", "跳过5", "跳过4", "跳过6",
+    # 纯英文
+    "SKIP", "Skip", "skip", "SKIP AD", "Skip Ad", "Skip ad",
+    "SKIP>", "Skip>", "SKIP 5", "SKIP 4", "SKIP 3", "SKIP 2", "SKIP 1",
+    "Skip >", "skip >",
+    # 变体（关闭/稍后/下一步、同意等常见进入主页前的最后一步）
+    "跳过引导", "跳过弹窗", "关闭广告", "取消", "CLOSE", "Close", "close",
+    "X", "✕", "✖", "×",  # 右上角叉号常见字符
+]
+# 包含这些关键字的资源ID、content-desc也视作跳过按钮候选
+_SPLASH_SKIP_RES_PATTERNS = [
+    "skip", "ad_skip", "btn_skip", "bt_skip", "button_skip",
+    "close", "ad_close", "btn_close", "cancel", "dismiss", "jump",
+]
+
+
+def try_skip_splash_screen(u2, log: Callable[[str], None], timeout_s: float = 4.5) -> bool:
+    """
+    负载App启动后，尝试点击欢迎页/广告页的「跳过/SKIP」按钮，快速进入主界面。
+    匹配策略（优先级从高到低，避免误点）：
+      1) 精确匹配 text 关键词（跳过 / SKIP 等 _SPLASH_SKIP_KEYWORDS）
+      2) 模糊匹配 textContains（包含关键字的更长文本，如 "3秒后跳过"）
+      3) 按 resourceId 模式（skip/ad_skip/btn_skip/close 等）
+      4) content-desc 关键字匹配
+    命中后点击坐标（避免 uiautomator2 click() 内部等待），最长轮询 timeout_s 秒。
+    """
+    import re as _re
+    end_at = time.time() + timeout_s
+    poll_interval = 0.4
+    clicked = False
+
+    def _try_click_element(el) -> bool:
+        """拿到 bounds 后坐标点击，失败回退到 click(timeout)"""
+        nonlocal clicked
+        try:
+            info = el.info
+            bounds = info.get("bounds") or {}
+            if bounds:
+                cx = (bounds.get("left", 0) + bounds.get("right", 0)) // 2
+                cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) // 2
+                # 按钮一般在屏幕上半部，跳过按钮通常<200px高；极端防误点
+                if 10 <= cx and 10 <= cy and cx <= 20000 and cy <= 20000:
+                    u2.d.click(cx, cy)
+                    clicked = True
+                    return True
+            # 兜底：走 element click
+            el.click(timeout=0.8)
+            clicked = True
+            return True
+        except Exception:
+            return False
+
+    def _hit_text(t: str) -> bool:
+        if not t:
+            return False
+        tt = t.strip()
+        if not tt:
+            return False
+        for kw in _SPLASH_SKIP_KEYWORDS:
+            if tt == kw:
+                return True
+        # 模糊命中：形如 "3 秒后跳过" / "3s Skip Ad"
+        low = tt.lower()
+        fuzzy_needles = ["跳过", "skip", "关闭广告", "close ad"]
+        for nd in fuzzy_needles:
+            if nd in low:
+                # 长度不要太离谱（避免把普通文案命中），最长<=20字符
+                if len(tt) <= 24:
+                    return True
+        return False
+
+    while time.time() < end_at:
+        # 1. 精确 text 匹配（遍历关键词，快路径）
+        found_exact = False
+        for kw in _SPLASH_SKIP_KEYWORDS:
+            try:
+                el = u2.d(text=kw)
+                if el.exists(timeout=0.08):
+                    info = el.info or {}
+                    # 粗略的"点击区域过滤"：跳过按钮一般在屏幕上半/右上角
+                    bounds = info.get("bounds") or {}
+                    cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) // 2 if bounds else 0
+                    if bounds and cy > 0:
+                        w, h = 2000, 2000  # placeholder
+                        try:
+                            ws = u2.get_window_size()
+                            w, h = ws[0], ws[1]
+                        except Exception:
+                            pass
+                        # 跳过按钮基本不会在屏幕下半段的中间（那里是"同意"或"开始使用"）
+                        # 但右上角、屏幕顶部1/3、右下角时间标旁边都可能有 -> 放宽
+                        # 仅过滤纯键盘行底部按钮：bottom > 90% 且 width<屏幕宽 60%
+                        bottom = bounds.get("bottom", 0)
+                        left = bounds.get("left", 0)
+                        right = bounds.get("right", 0)
+                        bw = right - left
+                        if bottom >= int(h * 0.93) and bw < int(w * 0.6):
+                            # 很可能是"同意/开始"类按钮，跳过
+                            continue
+                    log(f"    [跳过页] 命中text='{kw}'，点击")
+                    if _try_click_element(el):
+                        found_exact = True
+                        break
+            except Exception:
+                continue
+        if found_exact:
+            # 再等一下给页面跳转，尝试第二轮点（有时有两个广告连续）
+            time.sleep(0.6)
+            continue
+
+        # 2. 资源ID模式匹配（idMatches 正则）
+        try:
+            pattern = ".*(" + "|".join(_SPLASH_SKIP_RES_PATTERNS) + ").*"
+            el = u2.d(resourceIdMatches=pattern)
+            if el.exists(timeout=0.08):
+                # 取最靠上、且面积较小的（避免匹配到整个父布局）
+                cands = []
+                try:
+                    for e in el:
+                        try:
+                            info = e.info or {}
+                            b = info.get("bounds") or {}
+                            if not b:
+                                continue
+                            w_e = b.get("right", 0) - b.get("left", 0)
+                            h_e = b.get("bottom", 0) - b.get("top", 0)
+                            if w_e <= 0 or h_e <= 0:
+                                continue
+                            # 跳过按钮一般较小；极端尺寸直接跳过
+                            if w_e > 600 or h_e > 200:
+                                continue
+                            cands.append((b.get("top", 0), b.get("left", 0), e, info))
+                        except Exception:
+                            continue
+                except Exception:
+                    pass
+                if cands:
+                    cands.sort(key=lambda x: (x[0], x[1]))  # 顶部优先
+                    top_e = cands[0][2]
+                    # 再校验 text/desc，避免把"分享"、"搜索"等 close/btn_id 当作跳过
+                    try:
+                        txt = (cands[0][3].get("text") or "").strip()
+                        desc = (cands[0][3].get("contentDescription") or "").strip()
+                    except Exception:
+                        txt, desc = "", ""
+                    if _hit_text(txt) or _hit_text(desc):
+                        log(f"    [跳过页] 命中resId，点击 ({txt or desc or 'no-text'})")
+                        _try_click_element(top_e)
+                        time.sleep(0.6)
+                        continue
+                    # resID 强特征（btn_skip/ad_skip 等）且 text 为空（不少App跳过按钮是图片）也接受
+                    if not txt and not desc:
+                        log(f"    [跳过页] 命中resId(图片按钮)，点击")
+                        _try_click_element(top_e)
+                        time.sleep(0.6)
+                        continue
+        except Exception:
+            pass
+
+        # 3. contentDescription 模糊匹配
+        try:
+            # 拿顶层 dump 的 text+desc 太慢，退化为用 textContains 的几个强模糊词
+            for kw in ["跳过", "skip", "SKIP"]:
+                try:
+                    el = u2.d(textContains=kw)
+                    if el.exists(timeout=0.08):
+                        # 限制长度 < 16，防止把标题长文本点错
+                        try:
+                            txt = (el.info.get("text") or "").strip()
+                        except Exception:
+                            txt = ""
+                        if 0 < len(txt) <= 18 and ("跳过" in txt.lower() or "skip" in txt.lower()):
+                            log(f"    [跳过页] textContains命中='{txt}'，点击")
+                            _try_click_element(el)
+                            time.sleep(0.6)
+                            break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # 等一下再下一轮
+        time.sleep(poll_interval)
+
+    if clicked:
+        log("    [跳过页] 已尝试点击跳过欢迎页/广告页")
+    return clicked
+
+
+# ============================================================
+# 负载操作（每轮测试前执行，制造系统负载）
+# ============================================================
+
+# 负载操作配置：每个条目 {包名, 显示名, 操作类型, 参数, region}
+# 操作类型: "launch" 只启动, "swipe" 启动后滑动N次, "navigate" 启动后导航到指定目的地
+# region: "国内" 或 "海外"
+# text_aliases: 桌面图标文字别名（按顺序尝试匹配点击）
+LOAD_OPERATIONS = [
+    # 国内应用
+    {"package": "com.hihonor.health", "name": "运动健康", "action": "launch", "region": "国内",
+     "text_aliases": ["运动健康", "Honor Health"]},
+    {"package": "com.bilibili.app.in", "name": "哔哩哔哩", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["哔哩哔哩", "bilibili"]},
+    {"package": "com.autonavi.minimap", "name": "高德地图", "action": "navigate", "keyword": "大雁塔", "region": "国内",
+     "text_aliases": ["高德地图", "Amap"]},
+    {"package": "com.tencent.qqmusic", "name": "QQ音乐", "action": "launch", "region": "国内",
+     "text_aliases": ["QQ音乐"]},
+    {"package": "com.baidu.searchbox", "name": "百度", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["百度", "Baidu"]},
+    {"package": "com.dragon.read", "name": "番茄免费小说", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["番茄免费小说", "番茄小说"]},
+    {"package": "com.ss.android.article.news", "name": "今日头条", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["今日头条", "Toutiao"]},
+    {"package": "com.xunmeng.pinduoduo", "name": "拼多多", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["拼多多", "Pinduoduo"]},
+    {"package": "com.eg.android.AlipayGphone", "name": "支付宝", "action": "launch", "region": "国内",
+     "text_aliases": ["支付宝", "Alipay"]},
+    {"package": "com.google.android.apps.photos", "name": "图库", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["图库", "Photos"]},
+    {"package": "com.tencent.mm", "name": "微信", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["微信", "WeChat"]},
+    {"package": "com.ss.android.ugc.aweme", "name": "抖音", "action": "swipe", "count": 5, "region": "国内",
+     "text_aliases": ["抖音", "Douyin"]},
+    # 海外应用
+    {"package": "com.vivavideo.imkit", "name": "VivaVideo", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["VivaVideo"]},
+    {"package": "com.reddit.frontpage", "name": "reddit", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["reddit", "Reddit"]},
+    {"package": "com.shazam.android", "name": "Shazam", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Shazam"]},
+    {"package": "com.samsung.android.welt", "name": "Wolt", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Wolt"]},
+    {"package": "com.zynga.magictiles3", "name": "MagicTiles3", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["MagicTiles3"]},
+    {"package": "com.sec.android.app.sheinc", "name": "SHEIN", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["SHEIN"]},
+    {"package": "com.lidl.mobile.scanner", "name": "Lidl", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Lidl"]},
+    {"package": "com.ibisinc.ibispaintx", "name": "ibisPaint X", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["ibisPaint X", "ibisPaint"]},
+    {"package": "com.zedge.android", "name": "Zedge", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Zedge"]},
+    {"package": "com.blgo.superapp", "name": "BLGO LIVE", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["BLGO LIVE", "BLGO"]},
+    {"package": "com.meitu.reface", "name": "Reface", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Reface"]},
+    {"package": "com.kunlun.xrecorder", "name": "xRecorder", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["xRecorder"]},
+    {"package": "com.amazon.mShop.android.shopping", "name": "Amazon Shop", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Amazon Shop", "Amazon"]},
+    {"package": "com.android.chrome", "name": "Chrome", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Chrome"]},
+    {"package": "com.waze", "name": "Waze", "action": "swipe", "count": 5, "region": "海外",
+     "text_aliases": ["Waze"]},
+]
+
+
+def run_load_operations(u2, logger: Optional[Callable[[str], None]] = None, region: str = "国内"):
+    """执行负载操作：启动多个App并执行滑动等操作，制造系统负载
+    
+    Args:
+        u2: UiAutomatorManager 实例
+        logger: 日志输出函数
+        region: 负载区域筛选 - "国内" / "海外" / "全部"
+    """
+    log = logger or print
+    
+    # 根据 region 过滤负载操作
+    if region == "全部":
+        ops = LOAD_OPERATIONS
+    else:
+        ops = [op for op in LOAD_OPERATIONS if op.get("region") == region]
+    
+    log("=" * 50)
+    log(f"[负载操作] 开始执行 (区域={region})...")
+    log(f"[负载操作] 共 {len(ops)} 个App需要处理")
+    log("=" * 50)
+
+    import subprocess
+    success_count = 0
+    fail_count = 0
+
+    for idx, op in enumerate(ops, 1):
+        pkg = op["package"]
+        name = op["name"]
+        action = op["action"]
+        aliases = op.get("text_aliases", [name])
+
+        log(f"[{idx}/{len(ops)}] {name}({pkg}) - {action}...")
+        _T0 = time.time()
+
+        try:
+            # 1. 回桌面（确保在 Launcher 界面）
+            _T1 = time.time()
+            try:
+                u2.press_home()
+                time.sleep(0.5)
+            except Exception:
+                pass
+            _T_home = time.time() - _T1
+            log(f"  [打点] 回桌面完成 ({_T_home:.2f}s)，开始找图标...")
+
+            # 2. 通过文字找图标并点击启动
+            _T2 = time.time()
+            launched = False
+            _click_pos = None  # 记录坐标点击位置
+            for text in aliases:
+                try:
+                    el = u2.d(text=text)
+                    if el.exists(timeout=1):
+                        # 获取图标坐标，用坐标点击（避免 click() 内部等待）
+                        info = el.info
+                        bounds = info.get("bounds", {})
+                        if bounds:
+                            cx = (bounds.get("left", 0) + bounds.get("right", 0)) // 2
+                            cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) // 2
+                            _click_pos = (cx, cy)
+                            u2.d.click(cx, cy)
+                            log(f"  [打点] 坐标点击({cx},{cy}) 图标: '{text}'")
+                        else:
+                            el.click(timeout=1.5)
+                            log(f"  [打点] 元素点击图标: '{text}'")
+                        launched = True
+                        break
+                except Exception as _e:
+                    log(f"  [打点] 别名'{text}'查找失败: {_e}")
+                    continue
+
+            # 如果没找到，尝试 resource-id
+            if not launched:
+                try:
+                    el = u2.d(resourceId="com.android.launcher3:id/icon")
+                    if el.exists(timeout=1):
+                        for child in el:
+                            try:
+                                txt = child.get_text()
+                                if txt and txt in aliases:
+                                    child.click(timeout=1.5)
+                                    launched = True
+                                    log(f"  [打点] 点击了资源ID图标: '{txt}'")
+                                    break
+                            except Exception:
+                                continue
+                except Exception as _e:
+                    log(f"  [打点] resource-id遍历失败: {_e}")
+
+            # 最后 fallback 用 am start
+            if not launched:
+                log(f"  [打点] 桌面未找到图标，用 am start 兜底")
+                try:
+                    subprocess.run(
+                        ["adb", "-s", u2.device_id, "shell", "am", "start",
+                         "-a", "android.intent.action.MAIN",
+                         "-c", "android.intent.category.LAUNCHER",
+                         pkg],
+                        capture_output=True, timeout=3
+                    )
+                    launched = True
+                except Exception as _e:
+                    log(f"  [打点] am start兜底异常: {_e}")
+
+            # 等待 App 启动完成：先让欢迎页/广告页出现 (1.5s)，再尝试点跳过，最后补齐总等待
+            WAIT_TOTAL_S = 5.0
+            SPLASH_APPEAR_S = 1.5
+            SKIP_TIMEOUT_S = 3.0
+            log(f"  [打点] 等待启动(欢迎页出现{SPLASH_APPEAR_S}s + 跳过{SKIP_TIMEOUT_S}s + 补齐 共{WAIT_TOTAL_S}s)...")
+            _t_wait_start = time.time()
+            time.sleep(SPLASH_APPEAR_S)
+            try:
+                try_skip_splash_screen(u2, log, timeout_s=SKIP_TIMEOUT_S)
+            except Exception as _se:
+                log(f"  [跳过页] 异常: {_se}")
+            # 补齐到 WAIT_TOTAL_S（如果点击跳过逻辑很快结束就补齐等待；若超时则不额外加）
+            _elapsed = time.time() - _t_wait_start
+            _remain = WAIT_TOTAL_S - _elapsed
+            if _remain > 0:
+                time.sleep(_remain)
+            _T_launch = time.time() - _T2
+            log(f"  [打点] 启动阶段总耗时 {_T_launch:.2f}s")
+
+            if not launched:
+                log(f"  ❌ {name} 未能启动")
+                fail_count += 1
+                continue
+
+            # 3. 执行操作
+            _T3 = time.time()
+            if action == "launch":
+                log(f"  [打点] action=launch，无额外操作")
+
+            elif action == "swipe":
+                count = op.get("count", 5)
+                w, h = u2.get_window_size()
+                for i in range(count):
+                    try:
+                        u2.d.swipe(w * 0.5, h * 0.7, w * 0.5, h * 0.3, duration=0.3)
+                        time.sleep(0.3)
+                    except Exception as _e:
+                        log(f"  [打点] swipe第{i+1}次异常: {_e}")
+                        break
+                log(f"  [打点] swipe {count}次完成")
+
+            elif action == "navigate":
+                keyword = op.get("keyword", "")
+                if keyword:
+                    try:
+                        subprocess.run(
+                            ["adb", "-s", u2.device_id, "shell", "am", "start",
+                             "-a", "android.intent.action.VIEW",
+                             "-d", f"geo:0,0?q={keyword}"],
+                            capture_output=True, text=True, timeout=5
+                        )
+                        time.sleep(1)
+                    except Exception as _e:
+                        log(f"  [打点] 导航Intent异常: {_e}")
+                    w, h = u2.get_window_size()
+                    for i in range(3):
+                        try:
+                            u2.d.swipe(w * 0.5, h * 0.7, w * 0.5, h * 0.3, duration=0.3)
+                            time.sleep(0.3)
+                        except Exception as _e:
+                            log(f"  [打点] navigate swipe第{i+1}次异常: {_e}")
+                            break
+                    log(f"  [打点] navigate + swipe 3次完成")
+            _T_action = time.time() - _T3
+            log(f"  [打点] 操作阶段耗时 {_T_action:.2f}s")
+
+            _T_total = time.time() - _T0
+            log(f"[{idx}/{len(ops)}] {name} ✅ 完成 | 总耗时{_T_total:.2f}s "
+                f"(回桌面{_T_home:.2f}s + 启动{_T_launch:.2f}s + 操作{_T_action:.2f}s)")
+
+            success_count += 1
+
+        except Exception as e:
+            import traceback
+            fail_count += 1
+            log(f"[{idx}/{len(ops)}] {name} ❌ 失败: {e}")
+            log(f"  堆栈: {traceback.format_exc().strip()[-300:]}")
+
+    # 负载操作完成后：停止所有负载App + 回桌面，防止后台继续占用资源
+    import subprocess
+    log("[负载操作] 清理后台：停止所有负载App...")
+    kill_count = 0
+    for op in ops:
+        try:
+            subprocess.run(
+                ["adb", "-s", u2.device_id, "shell", "am", "force-stop", op["package"]],
+                capture_output=True, timeout=3
+            )
+            kill_count += 1
+        except Exception:
+            pass
+    log(f"[负载操作] 已停止 {kill_count} 个后台App")
+
+    try:
+        u2.press_home()
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    log("=" * 50)
+    log(f"[负载操作] 完成！成功{success_count}, 失败{fail_count}")
+    log("=" * 50)
 
 
 def case1_camera_photo_preview(u2, logger: Optional[Callable[[str], None]] = None):
     """case1: 相机拍照模式预览（保留向后兼容）"""
     log = logger or print
-    package = _get_package()
 
     log("[case1] 启动相机...")
-    try:
-        u2.stop_app(package)
-        time.sleep(1)
-    except Exception:
-        pass
-    u2.launch_app(package)
-    time.sleep(3)
+    _launch_camera(u2, log)
 
     # 尝试切到拍照模式
     log("[case1] 尝试切换到拍照模式...")
@@ -126,16 +598,9 @@ def case1_camera_photo_preview(u2, logger: Optional[Callable[[str], None]] = Non
 def case2_camera_video_preview(u2, logger: Optional[Callable[[str], None]] = None):
     """case2: 相机录像模式预览（保留向后兼容）"""
     log = logger or print
-    package = _get_package()
 
     log("[case2] 启动相机...")
-    try:
-        u2.stop_app(package)
-        time.sleep(1)
-    except Exception:
-        pass
-    u2.launch_app(package)
-    time.sleep(3)
+    _launch_camera(u2, log)
 
     # 尝试切到录像模式
     log("[case2] 尝试切换到录像模式...")
@@ -152,74 +617,87 @@ def case2_camera_video_preview(u2, logger: Optional[Callable[[str], None]] = Non
     log("[case2] 相机已就绪，返回等待录制...")
 
 
+def manual_interaction_test(u2, logger: Optional[Callable[[str], None]] = None):
+    """手动交互测试：不执行任何UI自动化，提示用户手动操作手机触发负载，用于测试卡顿检测功能"""
+    log = logger or print
+    log("=" * 50)
+    log("[手动交互测试] 请开始操作手机！")
+    log("[手动交互测试] 录制期间请启动高负载功能（如相机/游戏/视频等）")
+    log("[手动交互测试] Trace将在30s内持续录制...")
+    log("=" * 50)
+
+
 # ============================================================
 # 新6个Case脚本（对应需求Excel）：4拍照+2录像
 # ============================================================
 
 def _launch_camera(u2, log):
-    """通用：冷启动相机（am start优先，monkey备选，launch_app兜底）"""
-    import subprocess
+    """通用：冷启动相机（点击桌面图标启动）"""
     _pkg = _get_package()
+    aliases = _get_camera_text_aliases()
+    log("  → 回桌面...")
 
-    # Step 0: force-stop
-    log("  → am force-stop...")
+    # 1. 回桌面
     try:
-        subprocess.run(
-            ["adb", "shell", "am", "force-stop", _pkg],
-            capture_output=True, text=True, timeout=5
-        )
-        time.sleep(0.3)
-    except Exception as e:
-        log(f"  → force-stop异常: {e}")
+        u2.press_home()
+        time.sleep(0.5)
+    except Exception:
+        pass
 
-    # Step 1: am start 直接用intent启动
-    log("  → am start (intent方式)...")
-    _started = False
-    try:
-        result = subprocess.run(
-            ["adb", "shell", "am", "start",
-             "-a", "android.intent.action.MAIN",
-             "-c", "android.intent.category.LAUNCHER",
-             _pkg],
-            capture_output=True, text=True, timeout=5
-        )
-        output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode == 0:
-            _started = True
-            log(f"  → ✓ 相机已启动 (am start)")
-            if output.strip():
-                log(f"    {output.strip()[:100]}")
-        else:
-            log(f"  → am start返回非0: {result.returncode}")
-    except subprocess.TimeoutExpired:
-        log(f"  → am start超时")
-    except Exception as e:
-        log(f"  → am start异常: {e}")
-
-    # Step 2: monkey备选
-    if not _started:
-        log("  → am start未成功，尝试monkey(3s超时)...")
+    # 2. 按文字找图标并点击
+    launched = False
+    for text in aliases:
         try:
-            result = subprocess.run(
-                ["adb", "shell", "monkey", "-p", _pkg,
-                 "-c", "android.intent.category.LAUNCHER", "1"],
-                capture_output=True, text=True, timeout=3
+            el = u2.d(text=text)
+            if el.exists(timeout=1):
+                el.click()
+                launched = True
+                log(f"  → 点击了相机图标: '{text}'")
+                break
+        except Exception:
+            continue
+
+    # 找不到则尝试 resource-id 遍历
+    if not launched:
+        try:
+            el = u2.d(resourceId="com.android.launcher3:id/icon")
+            if el.exists(timeout=1):
+                for child in el:
+                    try:
+                        txt = child.get_text()
+                        if txt and txt in aliases:
+                            child.click()
+                            launched = True
+                            log(f"  → 点击了相机图标: '{txt}'")
+                            break
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    if not launched:
+        log("  ⚠️ 桌面未找到相机图标，用 am start 兜底...")
+        import subprocess
+        try:
+            subprocess.run(
+                ["adb", "shell", "am", "start",
+                 "-a", "android.intent.action.MAIN",
+                 "-c", "android.intent.category.LAUNCHER",
+                 _pkg],
+                capture_output=True, timeout=5
             )
-            if result.returncode == 0 and "Events injected" in (result.stdout or ""):
-                _started = True
-                log(f"  → ✓ 相机已启动 (monkey)")
-        except subprocess.TimeoutExpired:
-            log(f"  → monkey超时")
-        except Exception as e:
-            log(f"  → monkey异常: {e}")
+            launched = True
+        except Exception:
+            pass
 
-    # Step 3: launch_app兜底
-    if not _started:
-        log("  → 前面均失败，使用launch_app兜底(可能较慢)...")
-        try:
-            u2.launch_app(_pkg)
-        except Exception as e:
-            log(f"  → launch_app异常: {e}")
+    if not launched:
+        log("  ❌ 相机启动失败")
+        return
+
+    # 3. 等待相机启动
+    log("  → 等待相机启动...")
+    time.sleep(4)
+    log("  → ✓ 相机已启动")
 
 
 def _click_if_exists(u2, keywords, log, desc, wait_after=0.3):
@@ -650,6 +1128,8 @@ _BUILTIN_SCRIPTS: Dict[str, Callable] = {
     "photo_front_011_capture": photo_front_011_capture,
     "video_rear_003": video_rear_003,
     "video_front_006": video_front_006,
+    # 手动交互测试
+    "manual_interaction_test": manual_interaction_test,
 }
 
 

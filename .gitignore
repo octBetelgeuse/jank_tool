@@ -12,6 +12,7 @@ tools/
 
 # 运行时生成的结果文件
 results/
+apks_downloaded/
 *.perfetto-trace
 *_report.json
 *.csv

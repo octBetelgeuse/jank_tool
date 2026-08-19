@@ -60,6 +60,10 @@ class JankTestGUI:
         self.analysis_mode = tk.StringVar(value="duration")
         self.frame_threshold = tk.DoubleVar(value=16.67)
 
+        # 负载区域配置
+        self.load_region = tk.StringVar(value=self.app_cfg.load_region)
+        self.skip_load = tk.BooleanVar(value=False)
+
         # Case表格用的内存list（直接引用app_cfg.cases但便于GUI编辑）
         self.cases: list = self.app_cfg.cases
 
@@ -112,6 +116,14 @@ class JankTestGUI:
         ttk.Label(top_frame, text="输出目录:").grid(row=0, column=3, sticky=tk.W, padx=(16, 0))
         ttk.Entry(top_frame, textvariable=self.output_dir, width=40).grid(row=0, column=4, sticky=tk.W, padx=4)
         ttk.Button(top_frame, text="浏览", command=self.browse_output_dir).grid(row=0, column=5)
+
+        ttk.Label(top_frame, text="负载区域:").grid(row=0, column=6, sticky=tk.W, padx=(16, 0))
+        self.load_region_combobox = ttk.Combobox(
+            top_frame, textvariable=self.load_region,
+            values=["国内", "海外", "全部"], state="readonly", width=8
+        )
+        self.load_region_combobox.grid(row=0, column=7, sticky=tk.W, padx=4)
+        ttk.Checkbutton(top_frame, text="跳过负载", variable=self.skip_load).grid(row=0, column=8, sticky=tk.W, padx=(8, 0))
 
         # ---------- 卡顿等级阈值 ----------
         th_frame = ttk.LabelFrame(parent, text="卡顿等级阈值 (ms)", padding="6")
@@ -224,8 +236,14 @@ class JankTestGUI:
             value=", ".join(self.app_cfg.camera_ui.video_mode_keywords))
         ttk.Entry(cam_frame, textvariable=self.cam_video_kw_var, width=30).grid(row=3, column=4, columnspan=2, sticky=tk.W, padx=(4, 12), pady=(4, 0))
 
+        # 相机桌面图标文字别名
+        ttk.Label(cam_frame, text="相机图标文字别名(逗号分隔，用于点击启动):").grid(row=4, column=0, sticky=tk.W, pady=(4, 0))
+        self.cam_icon_aliases_var = tk.StringVar(
+            value=", ".join(self.app_cfg.camera_ui.camera_text_aliases))
+        ttk.Entry(cam_frame, textvariable=self.cam_icon_aliases_var, width=55).grid(row=4, column=1, columnspan=5, sticky=tk.W, padx=(4, 12), pady=(4, 0))
+
         ttk.Button(cam_frame, text="应用相机UI配置到脚本",
-                   command=self._apply_camera_ui).grid(row=4, column=0, columnspan=6, pady=(8, 0))
+                   command=self._apply_camera_ui).grid(row=5, column=0, columnspan=6, pady=(8, 0))
 
         # ---------- Case列表区 ----------
         list_frame = ttk.LabelFrame(parent, text="Case列表 (双击编辑)", padding="6")
@@ -283,12 +301,12 @@ class JankTestGUI:
         self.summary_tree = ttk.Treeview(result_frame, columns=SUMMARY_HEADERS, show="headings")
         for i, h in enumerate(SUMMARY_HEADERS):
             # 26列:
-            # 0名称 1描述 2时长 3性能帧数(SF) 4App帧 5SF帧
+            # 0名称 1描述 2时长 3总帧数(合计) 4全部进程帧 5SF帧
             # 6总帧率 7间隔帧率 8预览FPS 9成片FPS 10帧间隔 11帧时长
-            # 12-15 SF卡顿4级(细/轻/明/严)  16-19App侧4级  20-23SF侧4级  24卡顿率 25错误
+            # 12-15 SF卡顿4级(细/轻/明/严)  16-19全部进程4级  20-23SF侧4级  24卡顿率 25错误
             widths = [
                 140, 240, 70,   # 0-2
-                100, 70, 70,    # 3-5 (性能帧数SF, App帧, SF帧)
+                110, 70, 70,    # 3-5 (总帧数合计, 全部进程帧, SF帧)
                 130, 130,       # 6-7
                 130, 130,       # 8-9
                 110, 110,       # 10-11
@@ -470,6 +488,7 @@ class JankTestGUI:
             switch_camera_fallback_y_ratio=float(self.cam_switch_y_var.get()) / 100.0,
             photo_mode_keywords=[x.strip() for x in self.cam_photo_kw_var.get().split(",") if x.strip()],
             video_mode_keywords=[x.strip() for x in self.cam_video_kw_var.get().split(",") if x.strip()],
+            camera_text_aliases=[x.strip() for x in self.cam_icon_aliases_var.get().split(",") if x.strip()],
         )
 
     def _apply_camera_ui(self):
@@ -499,6 +518,7 @@ class JankTestGUI:
             self.app_cfg.thresholds = self._current_thresholds()
             self.app_cfg.camera_ui = self._current_camera_ui()
             self.app_cfg.package_name = self.app_cfg.camera_ui.package_name
+            self.app_cfg.load_region = self.load_region.get()
             save_config(self.app_cfg)
         except Exception as e:
             print(f"[警告] 窗口关闭保存配置失败: {e}")
@@ -669,6 +689,7 @@ class JankTestGUI:
         self.app_cfg.thresholds = self._current_thresholds()
         self.app_cfg.camera_ui = self._current_camera_ui()
         self.app_cfg.package_name = self.app_cfg.camera_ui.package_name
+        self.app_cfg.load_region = self.load_region.get()
         try:
             save_config(self.app_cfg)
             messagebox.showinfo("成功", f"配置已保存到: {DEFAULT_CASES_JSON}")
@@ -821,6 +842,8 @@ class JankTestGUI:
                 should_stop=lambda: self._stop_flag,
                 on_case_done=_on_done,
                 live_rows=live_rows,  # 传入可变列表
+                load_region=self.load_region.get(),
+                skip_load=self.skip_load.get(),
             )
             self.last_summary_rows = rows
             self.root.after(0, self._refresh_summary_tree, rows)
@@ -980,7 +1003,7 @@ class JankTestGUI:
             _log(f"最大帧间隔(ts差): {result.max_frame_gap_ms:.2f} ms, 最大帧时长(dur): {result.max_frame_dur_ms:.2f} ms")
             _log(f"轻微卡顿: {jl.slight}, 明显卡顿: {jl.obvious}, 严重卡顿: {jl.severe}")
             # 按来源分类打印
-            src_map = {"app": "App侧", "sf": "SF侧(SurfaceFlinger)", "other": "其他进程", "all": "全部进程"}
+            src_map = {"app": "全部进程", "sf": "SF侧(SurfaceFlinger)", "other": "其他进程"}
             src_keys = sorted(set(list(result.per_source_total_frames.keys()) + list(result.per_source_jank_frames.keys())))
             for sk in src_keys:
                 label = src_map.get(sk, sk)
@@ -1056,7 +1079,7 @@ class JankTestGUI:
             per_src = report.get("per_source_breakdown") or {}
             if per_src:
                 s += "--- 按帧来源分类 (方案A: 用户进程 + 自动附加SF) ---\n"
-                src_label_map = {"app": "App侧(用户指定进程)", "sf": "SF侧(SurfaceFlinger)", "other": "其他进程", "all": "全部进程"}
+                src_label_map = {"app": "全部进程", "sf": "SF侧(SurfaceFlinger)", "other": "其他进程"}
                 for src_key in sorted(per_src.keys()):
                     info = per_src[src_key]
                     label = info.get("label") or src_label_map.get(src_key, src_key)

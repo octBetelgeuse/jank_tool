@@ -41,8 +41,18 @@ class UiAutomatorManager:
     def wait_for_activity(self, activity_name: str, timeout: int = 60):
         return self.d.wait_activity(activity_name, timeout=timeout)
 
-    def launch_app(self, package_name: str):
-        self.d.app_start(package_name)
+    def launch_app(self, package_name: str, wait: bool = True):
+        """启动App
+        
+        Args:
+            package_name: 包名或应用名
+            wait: 是否等待App完全启动（True=慢但可靠，False=快但不等待）
+        """
+        self.d.app_start(package_name, wait=wait)
+
+    def fast_launch_app(self, package_name: str):
+        """快速启动App（不等待完全启动，适合负载操作场景）"""
+        self.d.app_start(package_name, wait=False)
 
     def stop_app(self, package_name: str):
         self.d.app_stop(package_name)

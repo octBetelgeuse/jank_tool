@@ -16,7 +16,7 @@ class CaseSummaryRow:
     case_name: str
     description: str
     duration_s: int
-    total_frames: int           # 合计帧（App+SF+其他）
+    total_frames: int           # 总帧数(合计) = 全部进程帧 + SF侧帧
     avg_fps_by_duration: float
     avg_fps_by_frame_interval: float
     max_frame_gap_ms: float
@@ -29,12 +29,12 @@ class CaseSummaryRow:
     jank_ratio_percent: float
     # 以下为带默认值的字段，必须放在所有必填字段之后
     # 帧数按来源拆分
-    app_total_frames: int = 0   # App侧帧（用户指定的进程）
+    app_total_frames: int = 0   # 全部进程帧（非SF的所有进程）
     sf_total_frames: int = 0    # SF侧帧（SurfaceFlinger）
-    # App侧 & SF侧 平均帧率 (帧数/录制时长，用于区分"成片/预览"两种FPS)
+    # 全部进程 & SF侧 平均帧率 (帧数/录制时长，用于区分"成片/预览"两种FPS)
     app_avg_fps: float = 0.0
     sf_avg_fps: float = 0.0
-    # App侧（用户进程）卡顿等级 4级
+    # 全部进程（非SF所有进程）卡顿等级 4级
     app_tiny: int = 0
     app_slight: int = 0
     app_obvious: int = 0
@@ -79,14 +79,14 @@ class CaseSummaryRow:
 
 SUMMARY_HEADERS = [
     "Case名称", "描述", "录制时长(s)",
-    "性能帧数(SF)", "App侧帧数", "SF侧帧数",
+    "总帧数(合计)", "全部进程帧数", "SF侧帧数",
     "平均帧率(总帧数/时长)", "平均帧率(按帧间隔)",
-    "预览平均帧率(App侧FPS)", "成片平均帧率(SF侧FPS)",
+    "预览平均帧率(全部进程FPS)", "成片平均帧率(SF侧FPS)",
     "最大帧间隔(ms, ts差)", "最大帧时长(ms, dur)",
     # 合计（4级，SF-only）
     "细微卡顿(SF)", "轻微卡顿(SF)", "明显卡顿(SF)", "严重卡顿(SF)",
-    # App侧（4级）
-    "App侧细微", "App侧轻微", "App侧明显", "App侧严重",
+    # 全部进程（4级，非SF的所有进程帧）
+    "全部进程细微", "全部进程轻微", "全部进程明显", "全部进程严重",
     # SF侧（4级）
     "SF侧细微", "SF侧轻微", "SF侧明显", "SF侧严重",
     "卡顿率(%)", "错误信息"
@@ -116,15 +116,17 @@ def build_summary_row(
         sf_bd = result.per_source_jank_level.get("sf") or _zero_bd()
         app_frames = result.per_source_total_frames.get("app", 0)
         sf_frames = result.per_source_total_frames.get("sf", 0)
-        # App侧 & SF侧 独立FPS（帧数/录制时长），用于区分"预览帧率/成片帧率"
+        # 全部进程 & SF侧 独立FPS（帧数/录制时长），用于区分"预览帧率/成片帧率"
         dur_s = float(case.duration) if case.duration > 0 else 0.0
         app_avg_fps = (app_frames / dur_s) if dur_s > 0 else 0.0
         sf_avg_fps = (sf_frames / dur_s) if dur_s > 0 else 0.0
+        # 总帧数(合计) = 全部进程帧数 + SF侧帧数（让列间关系直观：列3 = 列4 + 列5）
+        combined_total_frames = app_frames + sf_frames
         return CaseSummaryRow(
             case_name=case.name,
             description=case.description,
             duration_s=case.duration,
-            total_frames=result.total_frames,
+            total_frames=combined_total_frames,
             app_total_frames=app_frames,
             sf_total_frames=sf_frames,
             avg_fps_by_duration=result.avg_fps_by_duration,
@@ -139,7 +141,7 @@ def build_summary_row(
             obvious_jank=breakdown.obvious,
             severe_jank=breakdown.severe,
             jank_ratio_percent=result.jank_ratio * 100,
-            # App侧 4级
+            # 全部进程 4级
             app_tiny=getattr(app_bd, "tiny", 0),
             app_slight=getattr(app_bd, "slight", 0),
             app_obvious=getattr(app_bd, "obvious", 0),
@@ -242,12 +244,12 @@ def export_summary_excel(rows: List[CaseSummaryRow], output_path: str,
     # 列宽简单自适应（按中文粗略预估）- 26列
     widths = [
         18, 32, 12,     # Case名称, 描述, 录制时长
-        10, 10, 10,     # 性能帧数(SF), App侧帧, SF侧帧
+        12, 10, 10,     # 总帧数(合计), 全部进程帧, SF侧帧
         20, 20,         # 两种整体平均帧率
-        22, 22,         # 预览帧率(App侧), 成片帧率(SF侧)
+        22, 22,         # 预览帧率(全部进程), 成片帧率(SF侧)
         18, 16,         # 最大帧间隔/最大帧时长
         12, 12, 12, 12,  # SF卡顿4级(细微/轻微/明显/严重)
-        10, 10, 10, 10,  # App侧4级
+        10, 10, 10, 10,  # 全部进程4级
         10, 10, 10, 10,  # SF侧4级
         10, 30,         # 卡顿率, 错误信息
     ]

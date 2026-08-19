@@ -12,7 +12,7 @@ from case_config import (
     AppConfig, TestCaseConfig, JankLevelThresholds,
     load_config, save_config, default_config,
 )
-from case_scripts import resolve_script
+from case_scripts import resolve_script, run_load_operations
 from report_exporter import (
     CaseSummaryRow, build_summary_row, export_full_report,
 )
@@ -52,6 +52,8 @@ class JankTestTool:
                         jank_level_thresholds: Optional[JankLevelThresholds] = None,
                         logger: Optional[Callable[[str], None]] = None,
                         should_stop: Optional[Callable[[], bool]] = None,
+                        load_region: str = "国内",
+                        skip_load: bool = False,
                         ) -> Tuple[Optional[JankAnalysisResult], Optional[Dict[str, Any]], str]:
         """
         执行单个Case：先执行脚本→启动trace→录制→拉取→分析
@@ -69,7 +71,19 @@ class JankTestTool:
         # 1. 解析脚本
         script_func = resolve_script(case.script_name, case.script_path)
 
-        # 2. 执行自动化脚本（启动App、切换模式等）
+        # 2. 执行负载操作（每轮测试前都执行，制造系统负载）
+        if not skip_load:
+            log(f"[{case.name}] 执行负载操作...")
+            _T_load_start = time.time()
+            try:
+                run_load_operations(self.uiautomator, logger=log, region=load_region)
+                log(f"[{case.name}] 负载操作完成 (耗时{time.time()-_T_load_start:.2f}s)")
+            except Exception as e:
+                log(f"[{case.name}] 负载操作异常(可忽略, 录制继续): {e}")
+        else:
+            log(f"[{case.name}] ⏭️ 跳过负载操作")
+
+        # 3. 执行自动化脚本（启动App、切换模式等）
         during_trace_cb = None  # 可选的"trace期间回调"
         script_error = None
         _T_case_start = time.time()
@@ -95,7 +109,7 @@ class JankTestTool:
 
         log(f"[{case.name}] === 脚本阶段总耗时: {time.time()-_T_case_start:.2f}s ===")
 
-        # 3. 启动 trace（此时App已在前台，录制的是预览/操作阶段）
+        # 4. 启动 trace（此时App已在前台，录制的是预览/操作阶段）
         log(f"[{case.name}] 启动Perfetto trace录制 (时长={case.duration}s, 进程={case.monitor_processes})...")
         _T_trace_start = time.time()
         try:
@@ -110,7 +124,7 @@ class JankTestTool:
             log(f"[{case.name}] {err_msg}")
             return None, None, err_msg
 
-        # 4. 等待录制时长结束
+        # 5. 等待录制时长结束
         log(f"[{case.name}] 录制中 ({case.duration}s)...")
         _T_record_start = time.time()
         record_start = _T_record_start
@@ -145,7 +159,7 @@ class JankTestTool:
             log(f"[{case.name}] 停止trace提示(非致命): {e}")
         time.sleep(2)
 
-        # 5. 拉取 trace
+        # 6. 拉取 trace
         log(f"[{case.name}] 拉取trace文件...")
         try:
             self.adb_manager.pull_trace_file(local_path=trace_file)
@@ -154,7 +168,7 @@ class JankTestTool:
             log(f"[{case.name}] {err_msg}")
             return None, None, err_msg
 
-        # 6. 分析 trace
+        # 7. 分析 trace
         process_list = (
             None if (not case.monitor_processes or case.monitor_processes.strip() == "all" or case.monitor_processes.strip() == "")
             else [p.strip() for p in case.monitor_processes.split(",") if p.strip()]
@@ -207,6 +221,8 @@ class JankTestTool:
                        should_stop: Optional[Callable[[], bool]] = None,
                        on_case_done: Optional[Callable[[TestCaseConfig, Optional[JankAnalysisResult], str], None]] = None,
                        live_rows: Optional[list] = None,
+                       load_region: str = "国内",
+                       skip_load: bool = False,
                        ) -> Tuple[List[CaseSummaryRow], Dict[str, Dict[str, Any]]]:
         """
         批量执行多个Case，每个Case按 rounds 运行N轮，最后按Case汇总（数值取平均/计数取累加）
@@ -253,6 +269,8 @@ class JankTestTool:
                         jank_level_thresholds=jank_level_thresholds,
                         logger=log,
                         should_stop=should_stop,
+                        load_region=load_region,
+                        skip_load=skip_load,
                     )
                 except Exception as e:
                     result, report, err = None, None, f"执行异常: {e}"

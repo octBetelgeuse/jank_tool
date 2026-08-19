@@ -24,7 +24,7 @@ class JankEvent:
     process_name: Optional[str] = None
     exceeded_thresholds: List[str] = field(default_factory=list)  # 超出的阈值列表
     jank_level: Optional[str] = None  # 卡顿等级：slight / obvious / severe
-    frame_source: Optional[str] = None  # "app"=App侧帧 "sf"=SurfaceFlinger帧 "other"=其他
+    frame_source: Optional[str] = None  # "app"=全部进程(非SF)帧 "sf"=SurfaceFlinger帧 "other"=其他
 
 
 @dataclass
@@ -69,7 +69,7 @@ class JankAnalysisResult:
     # 录制参数（由外部填入，方便报告使用）
     record_duration_s: float = 0.0     # 设定的录制时长秒数
 
-    # ===== 按来源(App侧/SF侧)分类统计 =====
+    # ===== 按来源(全部进程/SF侧)分类统计 =====
     # 每个来源 = {"app"/"sf"/"other"}
     per_source_total_frames: Dict[str, int] = field(default_factory=dict)
     per_source_jank_frames: Dict[str, int] = field(default_factory=dict)
@@ -219,7 +219,7 @@ class PerfettoTraceAnalyzer:
 
         # ============================================================
         # 方案A：当用户指定具体App进程过滤时，自动附加SurfaceFlinger
-        #        同时保留"用户原始过滤列表"用于区分 App侧 vs SF侧
+        #        同时保留"用户原始过滤列表"用于区分 全部进程 vs SF侧
         # ============================================================
         SF_KEYWORDS = ("surfaceflinger", "/system/bin/surfaceflinger")
 
@@ -227,7 +227,7 @@ class PerfettoTraceAnalyzer:
             n = (name or "").lower()
             return any(k in n for k in SF_KEYWORDS)
 
-        # 保存原始用户输入（用于区分 App 侧标签）
+        # 保存原始用户输入（用于区分 全部进程 侧标签）
         user_filter_raw: List[str] = []
         if process_filter:
             # 清理空值
@@ -254,19 +254,21 @@ class PerfettoTraceAnalyzer:
         ]
 
         def _classify_source(process_name: str) -> str:
-            """给帧打来源标签"""
+            """给帧打来源标签：
+            - SF进程 -> sf
+            - 指定了App过滤列表时：匹配列表 -> app，不匹配 -> other
+            - All模式（没指定App过滤）：非SF都归为 app（即"所有用户进程"）
+            """
             if _is_sf_process(process_name):
                 return "sf"
-            # 如果用户明确指定了App过滤条件，且当前进程匹配用户列表 → app
+            # 用户明确指定了App过滤条件
             if user_app_patterns and process_name:
                 for pat in user_app_patterns:
                     if pat in process_name:
                         return "app"
-                # 用户指定了App过滤但当前进程匹配不上？
-                # 只有一种可能：这是自动附加的SF之外的进程（例如all模式或漏网之鱼）
-                # 走下面的兜底
-            # 兜底：用户给了具体App列表则不认识的归other；All模式统一归other
-            return "other" if user_app_patterns else "all"
+                return "other"
+            # All 模式：非 SF 进程一律算作 全部进程
+            return "app"
 
         # 构造 TraceProcessor 初始化参数
         if self.tp_bin_path:
@@ -493,8 +495,8 @@ class PerfettoTraceAnalyzer:
                     src_breakdown.obvious += 1
                 elif jank_level == "severe":
                     src_breakdown.severe += 1
-                # SF专用卡顿统计
-                if frame_source == "sf":
+                # SF专用卡顿统计（只统计有等级的帧，与等级汇总一致）
+                if frame_source == "sf" and jank_level is not None:
                     sf_jank_frames += 1
                     if jank_level == "tiny":
                         sf_jank_level_breakdown.tiny += 1
@@ -602,7 +604,7 @@ class PerfettoTraceAnalyzer:
         print(f"  平均帧率(按设定时长): {avg_fps_by_duration:.2f} FPS, 平均帧率(按帧间隔): {avg_fps_by_frame_interval:.2f} FPS")
         print(f"  最大帧间隔(ts差): {max_frame_gap_ms:.2f} ms, 最大帧时长(dur): {max_frame_dur_ms:.2f} ms")
         # 打印按来源分类
-        source_label_map = {"app": "App侧", "sf": "SF侧(SurfaceFlinger)", "other": "其他", "all": "全部进程"}
+        source_label_map = {"app": "全部进程", "sf": "SF侧(SurfaceFlinger)", "other": "其他进程"}
         for src_key in sorted(set(list(per_source_total_frames.keys()) + list(per_source_jank_frames.keys()))):
             label = source_label_map.get(src_key, src_key)
             src_total = per_source_total_frames.get(src_key, 0)
@@ -652,7 +654,7 @@ class PerfettoTraceAnalyzer:
 
         # 按来源分类统计 -> 转为可序列化dict
         per_source_report: Dict[str, Dict[str, Any]] = {}
-        source_label_map = {"app": "App侧", "sf": "SF侧(SurfaceFlinger)", "other": "其他", "all": "全部进程"}
+        source_label_map = {"app": "全部进程", "sf": "SF侧(SurfaceFlinger)", "other": "其他进程"}
         src_keys = sorted(set(
             list(result.per_source_total_frames.keys()) +
             list(result.per_source_jank_frames.keys()) +

@@ -118,6 +118,10 @@ class CameraUISettings:
     video_mode_keywords: List[str] = field(default_factory=lambda: [
         "录像", "视频", "VIDEO", "Video", "video", "录影",
     ])
+    # 相机桌面图标文字别名（用于点击启动，按顺序尝试）
+    camera_text_aliases: List[str] = field(default_factory=lambda: [
+        "相机", "Camera", "camera", "摄像头",
+    ])
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -139,6 +143,7 @@ class CameraUISettings:
             front_camera_keywords=list(data.get("front_camera_keywords", _defaults.front_camera_keywords)),
             photo_mode_keywords=list(data.get("photo_mode_keywords", _defaults.photo_mode_keywords)),
             video_mode_keywords=list(data.get("video_mode_keywords", _defaults.video_mode_keywords)),
+            camera_text_aliases=list(data.get("camera_text_aliases", _defaults.camera_text_aliases)),
         )
 
 
@@ -150,6 +155,7 @@ class AppConfig:
     thresholds: JankLevelThresholds = field(default_factory=JankLevelThresholds)
     camera_ui: CameraUISettings = field(default_factory=CameraUISettings)
     cases: List[TestCaseConfig] = field(default_factory=list)
+    load_region: str = "国内"  # 负载区域: "国内" / "海外" / "全部"
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -158,6 +164,7 @@ class AppConfig:
             "thresholds": self.thresholds.to_dict(),
             "camera_ui": self.camera_ui.to_dict(),
             "cases": [c.to_dict() for c in self.cases],
+            "load_region": self.load_region,
         }
 
     @classmethod
@@ -171,6 +178,7 @@ class AppConfig:
             thresholds=thresholds,
             camera_ui=camera_ui,
             cases=cases,
+            load_region=str(data.get("load_region", "国内")),
         )
 
 
@@ -186,6 +194,16 @@ def default_config() -> AppConfig:
             severe_min=167.0, severe_max=float('inf'),
         ),
         cases=[
+            # ---- 手动交互测试（默认存在，测试卡顿检测功能用）----
+            TestCaseConfig(
+                name="manual_interaction_test",
+                description="【手动交互测试】不执行UI自动化，录制30s，期间手动操作手机触发负载",
+                duration=30,
+                package_name="",
+                monitor_processes="all",
+                script_name="manual_interaction_test",
+                enabled=True,
+            ),
             # ---- 拍照：后置拍照模式 x2（启动后 / 拍照后，时长5s）----
             TestCaseConfig(
                 name="camera_photo_preview_001_003_启动后",
