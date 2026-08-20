@@ -246,11 +246,11 @@ class JankTestGUI:
                    command=self._apply_camera_ui).grid(row=5, column=0, columnspan=6, pady=(8, 0))
 
         # ---------- Case列表区 ----------
-        list_frame = ttk.LabelFrame(parent, text="Case列表 (双击编辑)", padding="6")
-        list_frame.pack(fill=tk.X, pady=2)
+        list_frame = ttk.LabelFrame(parent, text="Case列表 (双击编辑 · 点击✓列切换启用)", padding="6")
+        list_frame.pack(fill=tk.BOTH, expand=True, pady=2)
 
         cols = ("enabled", "name", "description", "rounds", "duration", "monitor_processes", "script_name")
-        self.case_tree = ttk.Treeview(list_frame, columns=cols, show="headings", height=7)
+        self.case_tree = ttk.Treeview(list_frame, columns=cols, show="headings", height=8)
         headings = [("enabled", "启用", 55), ("name", "Case名", 150), ("description", "描述", 280),
                     ("rounds", "轮数", 50),
                     ("duration", "时长s", 60),
@@ -258,7 +258,7 @@ class JankTestGUI:
         for key, txt, w in headings:
             self.case_tree.heading(key, text=txt)
             self.case_tree.column(key, width=w, anchor=tk.W)
-        self.case_tree.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.case_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         # 双击编辑（排除第一列enable和第四列rounds）
         self.case_tree.bind("<Double-1>", self._on_double_click_case_tree)
         # 单击第一列切换启用状态，单击轮数列编辑轮数
@@ -268,6 +268,7 @@ class JankTestGUI:
         vsb.pack(side=tk.LEFT, fill=tk.Y)
         self.case_tree.configure(yscrollcommand=vsb.set)
 
+        # ---- 右侧按钮区 ----
         btn_frame = ttk.Frame(list_frame)
         btn_frame.pack(side=tk.LEFT, fill=tk.Y, padx=4)
         ttk.Button(btn_frame, text="新增Case", command=self.on_add_case).pack(fill=tk.X, pady=2)
@@ -276,6 +277,14 @@ class JankTestGUI:
         ttk.Separator(btn_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
         ttk.Button(btn_frame, text="上移", command=lambda: self._move_case(-1)).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="下移", command=lambda: self._move_case(1)).pack(fill=tk.X, pady=2)
+        ttk.Separator(btn_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        # 全选 / 反选
+        self.select_all_var = tk.BooleanVar(value=False)
+        self.select_all_cb = ttk.Checkbutton(
+            btn_frame, text="全选", variable=self.select_all_var,
+            command=self._on_select_all_toggle)
+        self.select_all_cb.pack(fill=tk.X, pady=(0, 2))
+        ttk.Button(btn_frame, text="反选", command=self._on_invert_selection).pack(fill=tk.X, pady=2)
         ttk.Separator(btn_frame, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
         ttk.Button(btn_frame, text="保存Cases配置", command=self.on_save_cases).pack(fill=tk.X, pady=2)
         ttk.Button(btn_frame, text="打开内置脚本列表", command=self._show_builtin_scripts).pack(fill=tk.X, pady=2)
@@ -578,6 +587,7 @@ class JankTestGUI:
                     case.script_name,
                 )
             )
+        self._update_select_all_cb_state()
 
     def _on_click_case_tree(self, event):
         """点击第一列切换启用状态；点击第四列(#4)轮数弹出输入框修改"""
@@ -675,6 +685,29 @@ class JankTestGUI:
             self.cases[idx], self.cases[n_idx] = self.cases[n_idx], self.cases[idx]
             self._refresh_case_tree()
             self.case_tree.selection_set(str(n_idx))
+
+    def _on_select_all_toggle(self):
+        """全选复选框：勾选→所有Case启用；取消→所有Case禁用"""
+        enabled = self.select_all_var.get()
+        for case in self.cases:
+            case.enabled = enabled
+        self._refresh_case_tree()
+        self._update_select_all_cb_state()
+
+    def _on_invert_selection(self):
+        """反选：启用的变禁用，禁用的变启用"""
+        for case in self.cases:
+            case.enabled = not case.enabled
+        self._refresh_case_tree()
+        self._update_select_all_cb_state()
+
+    def _update_select_all_cb_state(self):
+        """刷新全选checkbox状态（根据当前所有case的启用情况）"""
+        if not self.cases:
+            self.select_all_var.set(False)
+            return
+        all_enabled = all(c.enabled for c in self.cases)
+        self.select_all_var.set(all_enabled)
 
     def on_save_thresholds(self):
         self.app_cfg.thresholds = self._current_thresholds()

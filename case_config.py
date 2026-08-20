@@ -261,6 +261,16 @@ def default_config() -> AppConfig:
                 script_name="video_front_006",
                 enabled=True,
             ),
+            # ---- 微信聊天调相机 → 预览5s ----
+            TestCaseConfig(
+                name="wechat_camera_preview",
+                description="【微信调相机】负载后启动微信→聊天→调用相机预览5s",
+                duration=5,
+                package_name="com.tencent.mm",
+                monitor_processes="com.tencent.mm",
+                script_name="wechat_camera_preview",
+                enabled=True,
+            ),
         ],
     )
     return cfg

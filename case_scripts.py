@@ -1118,6 +1118,199 @@ def video_front_006(u2, logger: Optional[Callable[[str], None]] = None):
     log("[录像-前置] 录像已开始，等待trace录制20s...")
 
 
+# ============================================================
+# 微信聊天界面调用相机 → 预览卡顿
+# 时序（由引擎控制）：
+#   1. 本函数：启动微信 → 进聊天 → 点+号 → 点拍摄/相机
+#   2. 引擎等待3s稳定 → 启动trace 5s（覆盖相机预览阶段）
+# ============================================================
+def wechat_camera_preview(u2, logger: Optional[Callable[[str], None]] = None):
+    """【微信调相机】启动微信→进入聊天→调用相机，预览5s"""
+    log = logger or print
+    WECHAT_PKG = "com.tencent.mm"
+    WECHAT_ALIASES = ["微信", "WeChat"]
+
+    # ---- 1. 回桌面 + 点击微信图标启动 ----
+    log("[微信调相机] 回桌面...")
+    try:
+        u2.press_home()
+        time.sleep(0.5)
+    except Exception:
+        pass
+
+    log("[微信调相机] 查找微信图标...")
+    launched = False
+    for text in WECHAT_ALIASES:
+        try:
+            el = u2.d(text=text)
+            if el.exists(timeout=1):
+                info = el.info
+                bounds = info.get("bounds", {})
+                if bounds:
+                    cx = (bounds.get("left", 0) + bounds.get("right", 0)) // 2
+                    cy = (bounds.get("top", 0) + bounds.get("bottom", 0)) // 2
+                    u2.d.click(cx, cy)
+                    log(f"[微信调相机] 坐标点击({cx},{cy}) 图标: '{text}'")
+                else:
+                    el.click(timeout=1.5)
+                    log(f"[微信调相机] 元素点击图标: '{text}'")
+                launched = True
+                break
+        except Exception:
+            continue
+
+    # 兜底：am start
+    if not launched:
+        log("[微信调相机] 桌面未找到微信图标，用 am start 兜底")
+        import subprocess
+        try:
+            subprocess.run(
+                ["adb", "-s", u2.device_id, "shell", "am", "start",
+                 "-a", "android.intent.action.MAIN",
+                 "-c", "android.intent.category.LAUNCHER",
+                 WECHAT_PKG],
+                capture_output=True, timeout=5
+            )
+            launched = True
+        except Exception as _e:
+            log(f"[微信调相机] am start兜底异常: {_e}")
+
+    if not launched:
+        log("[微信调相机] ❌ 微信启动失败")
+        return
+
+    # 等待微信启动 + 跳过欢迎页
+    # log("[微信调相机] 等待微信启动 (1.5s后尝试跳过欢迎页)...")
+    # time.sleep(1.5)
+    # try:
+    #     try_skip_splash_screen(u2, log, timeout_s=3.0)
+    # except Exception:
+    #     pass
+    # time.sleep(1.0)
+    # log("[微信调相机] 微信已启动")
+
+    # ---- 2. 进入聊天界面（点击列表中的第一个聊天）----
+    log("[微信调相机] 进入聊天界面...")
+    # 优先点击"文件传输助手"（每个微信都有，最稳定）
+    chat_entered = False
+    for chat_name in ["文件传输助手", "File Transfer", "腾讯新闻", "微信团队"]:
+        try:
+            if u2.exists(text=chat_name):
+                u2.click_element(text=chat_name)
+                log(f"[微信调相机] 点击聊天: '{chat_name}'")
+                chat_entered = True
+                time.sleep(1.5)
+                break
+        except Exception:
+            continue
+
+    # 兜底：点击列表中第一个可点击的聊天项
+    if not chat_entered:
+        try:
+            # 微信聊天列表项通常有 resource-id 含 "list" 或用 clickable 属性
+            el = u2.d(resourceIdMatches=".*list.*item.*|.*conversation.*|.*chat.*")
+            if el.exists(timeout=1):
+                el.click(timeout=1.5)
+                log("[微信调相机] 点击了列表中第一个聊天项(resId匹配)")
+                chat_entered = True
+                time.sleep(1.5)
+        except Exception:
+            pass
+
+    # 再兜底：直接点击屏幕中部偏上的聊天项坐标
+    if not chat_entered:
+        try:
+            w, h = u2.get_window_size()
+            u2.d.click(int(w * 0.5), int(h * 0.35))
+            log(f"[微信调相机] 坐标兜底点击聊天项 ({int(w*0.5)},{int(h*0.35)})")
+            chat_entered = True
+            time.sleep(1.5)
+        except Exception:
+            pass
+
+    if not chat_entered:
+        log("[微信调相机] ⚠️ 未进入聊天界面，尝试继续...")
+
+    # ---- 3. 点击"+"号 → 选择"拍摄"/"相机" ----
+    log("[微信调相机] 查找聊天界面"+"号...")
+    plus_clicked = False
+    # "+"号通常在右下角输入框旁，尝试多种定位方式
+    # 方式1: resourceId匹配
+    for rid_pattern in [".*plus.*", ".*add.*", ".*more.*", ".*expand.*"]:
+        try:
+            el = u2.d(resourceIdMatches=rid_pattern)
+            if el.exists(timeout=0.5):
+                el.click(timeout=1.0)
+                log(f"[微信调相机] 点击'+'号(resId={rid_pattern})")
+                plus_clicked = True
+                break
+        except Exception:
+            continue
+
+    # 方式2: content-desc匹配
+    if not plus_clicked:
+        for desc_kw in ["更多功能", "扩展功能", "添加", "更多", "+"]:
+            try:
+                if u2.exists(description=desc_kw):
+                    u2.click_element(description=desc_kw)
+                    log(f"[微信调相机] 点击'+'号(desc='{desc_kw}')")
+                    plus_clicked = True
+                    break
+            except Exception:
+                continue
+
+    # 方式3: 坐标兜底（"+"号一般在屏幕右下角，约 x=92%, y=85%）
+    if not plus_clicked:
+        try:
+            w, h = u2.get_window_size()
+            u2.d.click(int(w * 0.92), int(h * 0.85))
+            log(f"[微信调相机] 坐标兜底点击'+'号 ({int(w*0.92)},{int(h*0.85)})")
+            plus_clicked = True
+        except Exception:
+            pass
+
+    if not plus_clicked:
+        log("[微信调相机] ⚠️ 未找到'+'号，尝试直接找相机按钮...")
+
+    # 等待功能面板弹出
+    time.sleep(1.0)
+
+    # ---- 4. 在功能面板中点击"拍摄"或"相机" ----
+    log("[微信调相机] 查找'拍摄'/'相机'按钮...")
+    camera_clicked = False
+    for cam_kw in ["拍摄", "相机", "拍照", "Camera", "camera", "拍照录像"]:
+        try:
+            if u2.exists(text=cam_kw):
+                u2.click_element(text=cam_kw)
+                log(f"[微信调相机] 点击'{cam_kw}'按钮")
+                camera_clicked = True
+                time.sleep(1.5)
+                break
+        except Exception:
+            continue
+
+    # 兜底：content-desc
+    if not camera_clicked:
+        for cam_desc in ["拍摄", "相机", "拍照", "Camera"]:
+            try:
+                if u2.exists(description=cam_desc):
+                    u2.click_element(description=cam_desc)
+                    log(f"[微信调相机] 点击'相机'(desc='{cam_desc}')")
+                    camera_clicked = True
+                    time.sleep(1.5)
+                    break
+            except Exception:
+                continue
+
+    if not camera_clicked:
+        log("[微信调相机] ⚠️ 未找到相机按钮（可能需要手动点击一次）")
+
+    # 等待相机预览出现
+    log("[微信调相机] 等待相机预览出现 (2s)...")
+    time.sleep(2)
+    log("[微信调相机] 就绪，等待引擎启动trace录制预览5s")
+
+
 _BUILTIN_SCRIPTS: Dict[str, Callable] = {
     "case1_camera_photo_preview": case1_camera_photo_preview,
     "case2_camera_video_preview": case2_camera_video_preview,
@@ -1130,6 +1323,8 @@ _BUILTIN_SCRIPTS: Dict[str, Callable] = {
     "video_front_006": video_front_006,
     # 手动交互测试
     "manual_interaction_test": manual_interaction_test,
+    # 微信调相机
+    "wechat_camera_preview": wechat_camera_preview,
 }
 
 
